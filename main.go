@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log"
 	"net/http"
@@ -49,14 +50,53 @@ var ENDPOINT = os.Getenv("ENDPOINT")
 var INACTIVE_TIME = os.Getenv("INACTIVE_TIME")
 var MAX_TOKENS = os.Getenv("MAX_TOKENS")
 var MAX_THREADS = os.Getenv("MAX_THREADS")
+var INFO_ENDPOINT = os.Getenv("INFO_ENDPOINT")
 var SPLIT_STR_REGEX = regexp.MustCompile(`(?s)(?:.{1,1000}.{0,1000}(?:$|\s|\n)|.{1000}.{1000})`)
+var NAME_SNOWFLAKE_REGEX = regexp.MustCompile(`.*\[\d+\].*`)
+
+func getInfo() (float64, error) {
+	res, err := Get(INFO_ENDPOINT)
+	if err != nil {
+		log.Println("failed to get info:", err)
+		return 0, err
+	}
+	defer res.Body.Close()
+	if res.StatusCode >= 400 {
+		log.Println("failed to get info:", res.Status)
+		return 0, errors.New("status code was " + res.Status)
+	}
+
+	res_str, err := io.ReadAll(res.Body)
+	if err != nil {
+		log.Println("failed to get info:", err)
+		return 0, err
+	}
+
+	resp := InfoResponse{
+		Status: true,
+	}
+	err = json.Unmarshal(res_str, &resp)
+	if err != nil {
+		log.Println("failed to decode info response:", err)
+		return 0, err
+	}
+
+	if !resp.Status {
+		log.Println("failed to get info:", resp.Error)
+		return 0, errors.New(resp.Error)
+	}
+
+	return resp.Info.Credit, nil
+}
 
 func extractUserIDFromThreadName(name string) (discord.UserID, error) {
-	trimOne := name[10:]
-	trimOne = trimOne[:strings.Index(trimOne, " ")]
+	if !NAME_SNOWFLAKE_REGEX.MatchString(name) {
+		return discord.NullUserID, errors.New("could not parse user ID from thread name")
+	}
+	trimOne := name[strings.Index(name, "[")+1:]
+	trimOne = trimOne[:strings.Index(trimOne, "]")]
 	sf, err := discord.ParseSnowflake(trimOne)
 	if err != nil {
-		log.Println(123)
 		return discord.NullUserID, errors.New("could not parse user ID from thread name")
 	}
 	return discord.UserID(sf), nil
@@ -101,6 +141,15 @@ func Post(url, contentType string, body io.Reader) (resp *http.Response, err err
 	return http.DefaultClient.Do(req)
 }
 
+func Get(url string) (resp *http.Response, err error) {
+	req, err := http.NewRequest("GET", url, nil)
+	if err != nil {
+		return nil, err
+	}
+	req.Header.Set("Authorization", "Bearer "+APIKEY)
+	return http.DefaultClient.Do(req)
+}
+
 type ChatMessage struct {
 	Role    string `json:"role"`
 	Content string `json:"content"`
@@ -118,9 +167,19 @@ type ChatRequest struct {
 }
 
 type ChatResponse struct {
+	Status  bool   `json:"status"`
+	Error   string `json:"error"`
 	Choices []struct {
 		Message ChatMessage `json:"message"`
 	} `json:"choices"`
+}
+
+type InfoResponse struct {
+	Status bool   `json:"status"`
+	Error  string `json:"error"`
+	Info   struct {
+		Credit float64 `json:"credit"`
+	} `json:"info"`
 }
 
 func interactionCreateEvent(e *gateway.InteractionCreateEvent) {
@@ -236,7 +295,7 @@ func interactionCreateEvent(e *gateway.InteractionCreateEvent) {
 			break
 		}
 		thread, err := s.StartThreadWithoutMessage(e.ChannelID, api.StartThreadData{
-			Name:                "Chat with " + e.Member.User.ID.String() + " at " + time.Now().UTC().Format(time.DateTime),
+			Name:                "Chat with [" + e.Member.User.ID.String() + "] at " + time.Now().UTC().Format(time.DateTime),
 			AutoArchiveDuration: discord.OneHourArchive,
 			Type:                discord.GuildPrivateThread,
 			Invitable:           false,
@@ -390,6 +449,7 @@ func messageCreate(c *gateway.MessageCreateEvent) {
 	}
 
 	if res.StatusCode >= 400 {
+		res.Body.Close()
 		log.Println("could not query openai server:", res.Status)
 		s.SendMessageReply(c.ChannelID, "failed to query openai server", c.ID)
 		return
@@ -397,6 +457,7 @@ func messageCreate(c *gateway.MessageCreateEvent) {
 
 	res_str, err := io.ReadAll(res.Body)
 	if err != nil {
+		res.Body.Close()
 		log.Println("could not query openai server:", err)
 		s.SendMessageReply(c.ChannelID, "failed to query openai server", c.ID)
 		return
@@ -404,11 +465,19 @@ func messageCreate(c *gateway.MessageCreateEvent) {
 
 	res.Body.Close()
 
-	var resp ChatResponse
+	resp := ChatResponse{
+		Status: true,
+	}
 	err = json.Unmarshal(res_str, &resp)
 	if err != nil {
 		log.Println("could not decode openai response:", err)
 		s.SendMessageReply(c.ChannelID, "failed to decode openai response", c.ID)
+		return
+	}
+
+	if !resp.Status {
+		log.Println("could not query openai server:", resp.Error)
+		s.SendMessageReply(c.ChannelID, "failed to query openai server: "+resp.Error, c.ID)
 		return
 	}
 
@@ -587,7 +656,32 @@ func main() {
 
 	log.Println("Started as", self.Username)
 
+	timerSpeed := time.Minute
+
+	if inactiveTime/2 < timerSpeed {
+		timerSpeed = inactiveTime / 2
+	}
+
 	for {
+		if INFO_ENDPOINT != "" {
+			info, err := getInfo()
+			if err != nil {
+				log.Println("failed to get info:", err)
+			} else {
+				err = s.Gateway().Send(ctx, &gateway.UpdatePresenceCommand{
+					Activities: []discord.Activity{
+						{
+							Name: fmt.Sprintf("%g credits remaining", info),
+							Type: discord.GameActivity,
+						},
+					},
+				})
+				if err != nil {
+					log.Println("failed to update presence:", err)
+				}
+			}
+		}
+
 		gs, err := s.Guilds(0)
 		if err != nil {
 			log.Println("failed to get guilds:", err)
@@ -611,6 +705,7 @@ func main() {
 				}
 			}
 		}
-		time.Sleep(inactiveTime / 2)
+
+		time.Sleep(timerSpeed)
 	}
 }

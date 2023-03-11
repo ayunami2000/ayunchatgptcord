@@ -10,5 +10,6 @@ set "APIKEY="
 set "INACTIVE_TIME=10m"
 set "MAX_TOKENS=256"
 set "MAX_THREADS=3"
+set "INFO_ENDPOINT="
 go run .
 ```
