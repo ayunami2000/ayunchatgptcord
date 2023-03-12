@@ -22,6 +22,7 @@ import (
 	"github.com/diamondburned/arikawa/v3/gateway"
 	"github.com/diamondburned/arikawa/v3/session"
 	"github.com/diamondburned/arikawa/v3/utils/json/option"
+	"golang.org/x/exp/slices"
 )
 
 var s *session.Session
@@ -33,6 +34,7 @@ var inactiveTime = time.Minute * 10
 var maxTokens = uint(256)
 var threadCount = make(map[discord.GuildID]*ThreadCountMapWithLock)
 var maxThreads = uint(3)
+var expectingJoins = make(map[discord.ChannelID]*UserIDListWithLock)
 
 type ThreadCountWithLock struct {
 	Count uint
@@ -41,6 +43,11 @@ type ThreadCountWithLock struct {
 
 type ThreadCountMapWithLock struct {
 	Map  map[discord.UserID]*ThreadCountWithLock
+	Lock sync.Mutex
+}
+
+type UserIDListWithLock struct {
+	List []discord.UserID
 	Lock sync.Mutex
 }
 
@@ -202,6 +209,12 @@ func interactionCreateEvent(e *gateway.InteractionCreateEvent) {
 								Emoji:    &discord.ComponentEmoji{Name: "💬"},
 								Style:    discord.PrimaryButtonStyle(),
 							},
+							&discord.ButtonComponent{
+								Label:    "Start a mention-only thread!",
+								CustomID: "create_ping",
+								Emoji:    &discord.ComponentEmoji{Name: "💬"},
+								Style:    discord.PrimaryButtonStyle(),
+							},
 						},
 					),
 				},
@@ -224,6 +237,15 @@ func interactionCreateEvent(e *gateway.InteractionCreateEvent) {
 			} else {
 				targetUser := discord.UserID(sn)
 				basicResp = "**Inviting user!**"
+				if expectingJoins[e.ChannelID] == nil {
+					expectingJoins[e.ChannelID] = &UserIDListWithLock{}
+				}
+				expectingJoins[e.ChannelID].Lock.Lock()
+				if expectingJoins[e.ChannelID] == nil {
+					expectingJoins[e.ChannelID] = &UserIDListWithLock{}
+				}
+				expectingJoins[e.ChannelID].List = append(expectingJoins[e.ChannelID].List, targetUser)
+				expectingJoins[e.ChannelID].Lock.Unlock()
 				err = s.AddThreadMember(e.ChannelID, targetUser)
 				if err != nil {
 					basicResp = "**Error:** Could not invite user!"
@@ -294,8 +316,12 @@ func interactionCreateEvent(e *gateway.InteractionCreateEvent) {
 			basicResp = "**Error:** Each user can only have up to **" + strconv.Itoa(int(maxThreads)) + "** threads at a time!"
 			break
 		}
+		prefix := ""
+		if data.ID() == "create_ping" {
+			prefix = "(@) "
+		}
 		thread, err := s.StartThreadWithoutMessage(e.ChannelID, api.StartThreadData{
-			Name:                "Chat with [" + e.Member.User.ID.String() + "] at " + time.Now().UTC().Format(time.DateTime),
+			Name:                prefix + "Chat with [" + e.Member.User.ID.String() + "] at " + time.Now().UTC().Format(time.DateTime),
 			AutoArchiveDuration: discord.OneHourArchive,
 			Type:                discord.GuildPrivateThread,
 			Invitable:           false,
@@ -307,6 +333,15 @@ func interactionCreateEvent(e *gateway.InteractionCreateEvent) {
 			log.Println("could not create thread:", err)
 			break
 		}
+		if expectingJoins[thread.ID] == nil {
+			expectingJoins[thread.ID] = &UserIDListWithLock{}
+		}
+		expectingJoins[thread.ID].Lock.Lock()
+		if expectingJoins[thread.ID] == nil {
+			expectingJoins[thread.ID] = &UserIDListWithLock{}
+		}
+		expectingJoins[thread.ID].List = append(expectingJoins[thread.ID].List, e.Member.User.ID)
+		expectingJoins[thread.ID].Lock.Unlock()
 		err = s.AddThreadMember(thread.ID, e.Member.User.ID)
 		if err != nil {
 			addToThreadCount(e.GuildID, e.Member.User.ID, -1)
@@ -328,7 +363,6 @@ func interactionCreateEvent(e *gateway.InteractionCreateEvent) {
 			},
 		}
 	default:
-		// log.Printf("unknown interaction type %T", e.Data)
 		return
 	}
 
@@ -347,18 +381,64 @@ func interactionCreateEvent(e *gateway.InteractionCreateEvent) {
 	}
 }
 
-func threadMemberLeaveEvent(c *gateway.ThreadMembersUpdateEvent) {
+func threadMembersUpdateEvent(c *gateway.ThreadMembersUpdateEvent) {
+	invited := []discord.ThreadMember{}
+	if expectingJoins[c.ID] == nil {
+		expectingJoins[c.ID] = &UserIDListWithLock{}
+	}
+	expectingJoins[c.ID].Lock.Lock()
+	if expectingJoins[c.ID] == nil {
+		expectingJoins[c.ID] = &UserIDListWithLock{}
+	}
+	if len(c.AddedMembers) > 0 {
+		for _, tm := range c.AddedMembers {
+			for _, uid := range expectingJoins[c.ID].List {
+				if uid == tm.UserID {
+					invited = append(invited, tm)
+				}
+			}
+			for _, tm := range invited {
+				i := slices.Index(expectingJoins[c.ID].List, tm.UserID)
+				expectingJoins[c.ID].List = slices.Delete(expectingJoins[c.ID].List, i, i+1)
+			}
+		}
+		for _, tm := range c.AddedMembers {
+			if !slices.ContainsFunc(invited, func(tmtm discord.ThreadMember) bool {
+				return tmtm.UserID == tm.UserID
+			}) {
+				err := s.RemoveThreadMember(c.ID, tm.UserID)
+				if err != nil {
+					log.Println("could not remove thread member:", err)
+				}
+			}
+		}
+	}
+	lck := &expectingJoins[c.ID].Lock
+	if len(expectingJoins[c.ID].List) == 0 {
+		delete(expectingJoins, c.ID)
+	}
+	lck.Unlock()
 	m, err := s.ThreadMembers(c.ID)
 	if err != nil {
 		log.Println("could not get thread members:", err)
 		return
 	}
-	if len(m) == 0 || (len(m) == 1 && m[0].UserID == botID) {
-		ch, err := s.Channel(c.ID)
-		if err != nil {
-			log.Println("could not get channel:", err)
-			return
+	ch, err := s.Channel(c.ID)
+	if err != nil {
+		log.Println("could not get channel:", err)
+		return
+	}
+	if len(invited) > 0 {
+		for _, tm := range invited {
+			if tm.Member.User.Bot && tm.UserID != botID {
+				err = s.RemoveThreadMember(c.ID, tm.UserID)
+				if err != nil {
+					log.Println("could not remove thread member:", err)
+				}
+			}
 		}
+	}
+	if len(m) == 0 || (len(m) == 1 && m[0].UserID == botID) {
 		threadUserID, err := extractUserIDFromThreadName(ch.Name)
 		if err == nil {
 			addToThreadCount(c.GuildID, threadUserID, -1)
@@ -392,6 +472,15 @@ func messageCreate(c *gateway.MessageCreateEvent) {
 	}
 	if ch.Type != discord.GuildPrivateThread {
 		return
+	}
+
+	if strings.Contains(ch.Name, "(@)") {
+		if !slices.ContainsFunc(c.Mentions, func(u discord.GuildUser) bool {
+			return u.ID == botID
+		}) {
+			return
+		}
+		c.Content = strings.TrimPrefix(c.Content, botID.Mention())
 	}
 
 	if !muti.TryLock(c.ChannelID) {
@@ -652,7 +741,7 @@ func main() {
 	s.AddHandler(messageCreate)
 	s.AddHandler(threadDeleteEvent)
 	s.AddHandler(interactionCreateEvent)
-	s.AddHandler(threadMemberLeaveEvent)
+	s.AddHandler(threadMembersUpdateEvent)
 
 	log.Println("Started as", self.Username)
 
