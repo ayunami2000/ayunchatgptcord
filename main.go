@@ -722,13 +722,20 @@ func main() {
 				msgs[i], msgs[j] = msgs[j], msgs[i]
 			}
 
+			ae := strings.Contains(thread.Name, "(@)")
+
 			for _, msg := range msgs {
 				if msg.Author.ID == botID {
 					threads[thread.ID] = append(threads[thread.ID], ChatMessage{
 						Role:    "assistant",
 						Content: msg.Content,
 					})
-				} else {
+				} else if !ae || slices.ContainsFunc(msg.Mentions, func(u discord.GuildUser) bool {
+					return u.ID == botID
+				}) {
+					if ae {
+						msg.Content = strings.TrimPrefix(msg.Content, botID.Mention())
+					}
 					threads[thread.ID] = append(threads[thread.ID], ChatMessage{
 						Role:    "user",
 						Content: msg.Content,
