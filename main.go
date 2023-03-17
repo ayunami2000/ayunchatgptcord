@@ -421,6 +421,7 @@ func threadMembersUpdateEvent(c *gateway.ThreadMembersUpdateEvent) {
 	expectingJoins[c.ID].Lock.Lock()
 	if expectingJoins[c.ID] == nil {
 		expectingJoins[c.ID] = &UserIDListWithLock{}
+		expectingJoins[c.ID].Lock.Lock()
 	}
 	if len(c.AddedMembers) > 0 {
 		for _, tm := range c.AddedMembers {
@@ -445,10 +446,11 @@ func threadMembersUpdateEvent(c *gateway.ThreadMembersUpdateEvent) {
 			}
 		}
 	}
-	expectingJoins[c.ID].Lock.Unlock()
+	lck := &expectingJoins[c.ID].Lock
 	if len(expectingJoins[c.ID].List) == 0 {
 		delete(expectingJoins, c.ID)
 	}
+	lck.Unlock()
 	m, err := s.ThreadMembers(c.ID)
 	if err != nil {
 		log.Println("could not get thread members:", err)
