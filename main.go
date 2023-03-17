@@ -121,6 +121,7 @@ func addToThreadCount(guildID discord.GuildID, userID discord.UserID, amount int
 	threadCount[guildID].Lock.Lock()
 	if threadCount[guildID].Map[userID] == nil {
 		threadCount[guildID].Map[userID] = &ThreadCountWithLock{Count: 0}
+		threadCount[guildID].Lock.Lock()
 	}
 	threadCount[guildID].Map[userID].Lock.Lock()
 	newVal := uint(int(threadCount[guildID].Map[userID].Count) + amount)
@@ -271,6 +272,7 @@ func interactionCreateEvent(e *gateway.InteractionCreateEvent) {
 				expectingJoins[e.ChannelID].Lock.Lock()
 				if expectingJoins[e.ChannelID] == nil {
 					expectingJoins[e.ChannelID] = &UserIDListWithLock{}
+					expectingJoins[e.ChannelID].Lock.Lock()
 				}
 				expectingJoins[e.ChannelID].List = append(expectingJoins[e.ChannelID].List, targetUser)
 				expectingJoins[e.ChannelID].Lock.Unlock()
@@ -371,6 +373,7 @@ func interactionCreateEvent(e *gateway.InteractionCreateEvent) {
 		expectingJoins[thread.ID].Lock.Lock()
 		if expectingJoins[thread.ID] == nil {
 			expectingJoins[thread.ID] = &UserIDListWithLock{}
+			expectingJoins[thread.ID].Lock.Lock()
 		}
 		expectingJoins[thread.ID].List = append(expectingJoins[thread.ID].List, e.Member.User.ID)
 		expectingJoins[thread.ID].Lock.Unlock()
