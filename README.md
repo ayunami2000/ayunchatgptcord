@@ -7,9 +7,13 @@ ChatGPT as a Discord server!
 set "BOT_TOKEN="
 set "ENDPOINT=https://api.openai.com/v1/chat/completions"
 set "APIKEY="
+set "ENDPOINT_GPT4=https://api.openai.com/v1/chat/completions"
+set "APIKEY_GPT4="
 set "INACTIVE_TIME=10m"
 set "MAX_TOKENS=256"
 set "MAX_THREADS=3"
 set "INFO_ENDPOINT="
+set "INFO_APIKEY="
+set "ENABLE_GPT4=true"
 go run .
 ```

@@ -35,6 +35,7 @@ var maxTokens = uint(256)
 var threadCount = make(map[discord.GuildID]*ThreadCountMapWithLock)
 var maxThreads = uint(3)
 var expectingJoins = make(map[discord.ChannelID]*UserIDListWithLock)
+var gpt4 = false
 
 type ThreadCountWithLock struct {
 	Count uint
@@ -52,17 +53,21 @@ type UserIDListWithLock struct {
 }
 
 var TOKEN = os.Getenv("BOT_TOKEN")
+var ENABLE_GPT4 = os.Getenv("ENABLE_GPT4")
 var APIKEY = os.Getenv("APIKEY")
 var ENDPOINT = os.Getenv("ENDPOINT")
+var APIKEY_GPT4 = os.Getenv("APIKEY_GPT4")
+var ENDPOINT_GPT4 = os.Getenv("ENDPOINT_GPT4")
 var INACTIVE_TIME = os.Getenv("INACTIVE_TIME")
 var MAX_TOKENS = os.Getenv("MAX_TOKENS")
 var MAX_THREADS = os.Getenv("MAX_THREADS")
+var INFO_APIKEY = os.Getenv("INFO_APIKEY")
 var INFO_ENDPOINT = os.Getenv("INFO_ENDPOINT")
 var SPLIT_STR_REGEX = regexp.MustCompile(`(?s)(?:.{1,1000}.{0,1000}(?:$|\s|\n)|.{1000}.{1000})`)
 var NAME_SNOWFLAKE_REGEX = regexp.MustCompile(`.*\[\d+\].*`)
 
 func getInfo() (float64, error) {
-	res, err := Get(INFO_ENDPOINT)
+	res, err := GetWithKey(INFO_ENDPOINT, INFO_APIKEY)
 	if err != nil {
 		log.Println("failed to get info:", err)
 		return 0, err
@@ -138,22 +143,22 @@ func addToThreadCount(guildID discord.GuildID, userID discord.UserID, amount int
 	return nil
 }
 
-func Post(url, contentType string, body io.Reader) (resp *http.Response, err error) {
+func PostWithKey(url, apiKey string, contentType string, body io.Reader) (resp *http.Response, err error) {
 	req, err := http.NewRequest("POST", url, body)
 	if err != nil {
 		return nil, err
 	}
 	req.Header.Set("Content-Type", contentType)
-	req.Header.Set("Authorization", "Bearer "+APIKEY)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	return http.DefaultClient.Do(req)
 }
 
-func Get(url string) (resp *http.Response, err error) {
+func GetWithKey(url string, apiKey string) (resp *http.Response, err error) {
 	req, err := http.NewRequest("GET", url, nil)
 	if err != nil {
 		return nil, err
 	}
-	req.Header.Set("Authorization", "Bearer "+APIKEY)
+	req.Header.Set("Authorization", "Bearer "+apiKey)
 	return http.DefaultClient.Do(req)
 }
 
@@ -197,25 +202,48 @@ func interactionCreateEvent(e *gateway.InteractionCreateEvent) {
 	case *discord.CommandInteraction:
 		switch data.Name {
 		case "initbuttons":
+			bc1 := &discord.ButtonComponent{
+				Label:    "Start a thread!",
+				CustomID: "create",
+				Emoji:    &discord.ComponentEmoji{Name: "💬"},
+				Style:    discord.PrimaryButtonStyle(),
+			}
+			bc2 := &discord.ButtonComponent{
+				Label:    "Start a mention-only thread!",
+				CustomID: "create_ping",
+				Emoji:    &discord.ComponentEmoji{Name: "💬"},
+				Style:    discord.PrimaryButtonStyle(),
+			}
+			arc := &discord.ActionRowComponent{}
+			if gpt4 {
+				arc = &discord.ActionRowComponent{
+					bc1,
+					bc2,
+					&discord.ButtonComponent{
+						Label:    "Start a GPT-4 thread!",
+						CustomID: "create_gpt4",
+						Emoji:    &discord.ComponentEmoji{Name: "💬"},
+						Style:    discord.PrimaryButtonStyle(),
+					},
+					&discord.ButtonComponent{
+						Label:    "Start a GPT-4 mention-only thread!",
+						CustomID: "create_gpt4_ping",
+						Emoji:    &discord.ComponentEmoji{Name: "💬"},
+						Style:    discord.PrimaryButtonStyle(),
+					},
+				}
+			} else {
+				arc = &discord.ActionRowComponent{
+					bc1,
+					bc2,
+				}
+			}
 			resp = api.InteractionResponse{
 				Type: api.MessageInteractionWithSource,
 				Data: &api.InteractionResponseData{
-					Content: option.NewNullableString("**Welcome!** Press the button below to create a new thread.\n- Each user can have up to **" + strconv.Itoa(int(maxThreads)) + "** threads at a time.\n- Threads will be automatically deleted after **" + inactiveTime.String() + "** of inactivity.\n- **Invite** people to your thread with `/invite`!\n- **Remove** people from your thread with `/remove`!\n- **Delete** your thread with `/delete`!"),
+					Content: option.NewNullableString("**Welcome!** Press one of the buttons below to create a new thread.\n- Each user can have up to **" + strconv.Itoa(int(maxThreads)) + "** threads at a time.\n- Threads will be automatically deleted after **" + inactiveTime.String() + "** of inactivity.\n- **Invite** people to your thread with `/invite`!\n- **Remove** people from your thread with `/remove`!\n- **Delete** your thread with `/delete`!"),
 					Components: discord.ComponentsPtr(
-						&discord.ActionRowComponent{
-							&discord.ButtonComponent{
-								Label:    "Start a thread!",
-								CustomID: "create",
-								Emoji:    &discord.ComponentEmoji{Name: "💬"},
-								Style:    discord.PrimaryButtonStyle(),
-							},
-							&discord.ButtonComponent{
-								Label:    "Start a mention-only thread!",
-								CustomID: "create_ping",
-								Emoji:    &discord.ComponentEmoji{Name: "💬"},
-								Style:    discord.PrimaryButtonStyle(),
-							},
-						},
+						arc,
 					),
 				},
 			}
@@ -316,9 +344,13 @@ func interactionCreateEvent(e *gateway.InteractionCreateEvent) {
 			basicResp = "**Error:** Each user can only have up to **" + strconv.Itoa(int(maxThreads)) + "** threads at a time!"
 			break
 		}
+		actionId := string(data.ID())
 		prefix := ""
-		if data.ID() == "create_ping" {
+		if strings.HasSuffix(actionId, "_ping") {
 			prefix = "(@) "
+		}
+		if strings.HasSuffix(actionId, "_gpt4") || strings.Contains(actionId, "_gpt4_") {
+			prefix = prefix + "(GPT-4) "
 		}
 		thread, err := s.StartThreadWithoutMessage(e.ChannelID, api.StartThreadData{
 			Name:                prefix + "Chat with [" + e.Member.User.ID.String() + "] at " + time.Now().UTC().Format(time.DateTime),
@@ -512,8 +544,17 @@ func messageCreate(c *gateway.MessageCreateEvent) {
 		Content: c.Content,
 	})
 
+	endpoint := ENDPOINT
+	apiKey := APIKEY
+	model := "gpt-3.5-turbo"
+	if gpt4 && strings.Contains(ch.Name, "(GPT-4)") {
+		endpoint = ENDPOINT_GPT4
+		apiKey = APIKEY_GPT4
+		model = "gpt-4"
+	}
+
 	req := ChatRequest{
-		Model:            "gpt-3.5-turbo",
+		Model:            model,
 		Messages:         threads[c.ChannelID],
 		Temperature:      0.7,
 		MaxTokens:        maxTokens,
@@ -530,7 +571,7 @@ func messageCreate(c *gateway.MessageCreateEvent) {
 		return
 	}
 
-	res, err := Post(ENDPOINT, "application/json", bytes.NewReader(b))
+	res, err := PostWithKey(endpoint, apiKey, "application/json", bytes.NewReader(b))
 	if err != nil {
 		log.Println("could not query openai server:", err)
 		s.SendMessageReply(c.ChannelID, "failed to query openai server", c.ID)
@@ -607,6 +648,18 @@ func main() {
 		ENDPOINT = "https://api.openai.com/v1/chat/completions"
 	}
 
+	if APIKEY_GPT4 == "" {
+		APIKEY_GPT4 = APIKEY
+	}
+
+	if ENDPOINT_GPT4 == "" {
+		ENDPOINT_GPT4 = ENDPOINT
+	}
+
+	if b, err := strconv.ParseBool(ENABLE_GPT4); err == nil && b {
+		gpt4 = true
+	}
+
 	if INACTIVE_TIME != "" {
 		dur, err := time.ParseDuration(INACTIVE_TIME)
 		if err != nil {
@@ -629,6 +682,10 @@ func main() {
 			log.Fatalln("invalid MAX_THREADS:", err)
 		}
 		maxThreads = uint(threadCount)
+	}
+
+	if INFO_APIKEY == "" {
+		INFO_APIKEY = APIKEY
 	}
 
 	s = session.New("Bot " + TOKEN)
