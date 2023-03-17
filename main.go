@@ -121,7 +121,6 @@ func addToThreadCount(guildID discord.GuildID, userID discord.UserID, amount int
 	threadCount[guildID].Lock.Lock()
 	if threadCount[guildID].Map[userID] == nil {
 		threadCount[guildID].Map[userID] = &ThreadCountWithLock{Count: 0}
-		threadCount[guildID].Lock.Lock()
 	}
 	threadCount[guildID].Map[userID].Lock.Lock()
 	newVal := uint(int(threadCount[guildID].Map[userID].Count) + amount)
