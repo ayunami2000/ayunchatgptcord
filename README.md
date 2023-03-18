@@ -15,5 +15,6 @@ set "MAX_THREADS=3"
 set "INFO_ENDPOINT="
 set "INFO_APIKEY="
 set "ENABLE_GPT4=true"
+set "MAX_MSGS=10"
 go run .
 ```

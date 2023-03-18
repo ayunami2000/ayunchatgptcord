@@ -31,11 +31,12 @@ var muti = mapmutex.NewMapMutex()
 var threads = make(map[discord.ChannelID][]ChatMessage)
 var ctx context.Context
 var inactiveTime = time.Minute * 10
-var maxTokens = uint(256)
+var maxTokens uint = 256
 var threadCount = make(map[discord.GuildID]*ThreadCountMapWithLock)
-var maxThreads = uint(3)
+var maxThreads uint = 3
 var expectingJoins = make(map[discord.ChannelID]*UserIDListWithLock)
 var gpt4 = false
+var maxMsgs int = 10
 
 type ThreadCountWithLock struct {
 	Count uint
@@ -65,6 +66,7 @@ var INFO_APIKEY = os.Getenv("INFO_APIKEY")
 var INFO_ENDPOINT = os.Getenv("INFO_ENDPOINT")
 var SPLIT_STR_REGEX = regexp.MustCompile(`(?s)(?:.{1,1000}.{0,1000}(?:$|\s|\n)|.{1000}.{1000})`)
 var NAME_SNOWFLAKE_REGEX = regexp.MustCompile(`.*\[\d+\].*`)
+var MAX_MSGS = os.Getenv("MAX_MSGS")
 
 func getInfo() (float64, error) {
 	res, err := GetWithKey(INFO_ENDPOINT, INFO_APIKEY)
@@ -241,7 +243,7 @@ func interactionCreateEvent(e *gateway.InteractionCreateEvent) {
 			resp = api.InteractionResponse{
 				Type: api.MessageInteractionWithSource,
 				Data: &api.InteractionResponseData{
-					Content: option.NewNullableString("**Welcome!** Press one of the buttons below to create a new thread.\n- Each user can have up to **" + strconv.Itoa(int(maxThreads)) + "** threads at a time.\n- Threads will be automatically deleted after **" + inactiveTime.String() + "** of inactivity.\n- **Invite** people to your thread with `/invite`!\n- **Remove** people from your thread with `/remove`!\n- **Delete** your thread with `/delete`!"),
+					Content: option.NewNullableString("**Welcome!** Press one of the buttons below to create a new thread.\n- Each user can have up to **" + strconv.Itoa(int(maxThreads)) + "** threads at a time.\n- Threads will be automatically deleted after **" + inactiveTime.String() + "** of inactivity.\n- The last **" + strconv.Itoa(maxMsgs) + "** messages will be remembered by the bot.\n- **Invite** people to your thread with `/invite`!\n- **Remove** people from your thread with `/remove`!\n- **Delete** your thread with `/delete`!"),
 					Components: discord.ComponentsPtr(
 						arc,
 					),
@@ -615,6 +617,10 @@ func messageCreate(c *gateway.MessageCreateEvent) {
 	}
 
 	for _, choice := range resp.Choices {
+		tl := len(threads[c.ChannelID])
+		if tl >= maxMsgs {
+			threads[c.ChannelID] = threads[c.ChannelID][(1 + tl - maxMsgs):]
+		}
 		threads[c.ChannelID] = append(threads[c.ChannelID], choice.Message)
 
 		if choice.Message.Role == "assistant" {
@@ -689,6 +695,14 @@ func main() {
 
 	if INFO_APIKEY == "" {
 		INFO_APIKEY = APIKEY
+	}
+
+	if MAX_MSGS != "" {
+		mm, err := strconv.Atoi(MAX_MSGS)
+		if err != nil || mm < 0 {
+			log.Fatalln("invalid MAX_MSGS:", err)
+		}
+		maxMsgs = mm
 	}
 
 	s = session.New("Bot " + TOKEN)
@@ -786,6 +800,10 @@ func main() {
 
 			for _, msg := range msgs {
 				if msg.Author.ID == botID {
+					tl := len(threads[thread.ID])
+					if tl >= maxMsgs {
+						threads[thread.ID] = threads[thread.ID][(1 + tl - maxMsgs):]
+					}
 					threads[thread.ID] = append(threads[thread.ID], ChatMessage{
 						Role:    "assistant",
 						Content: msg.Content,
@@ -795,6 +813,10 @@ func main() {
 				}) {
 					if ae {
 						msg.Content = strings.TrimPrefix(msg.Content, botID.Mention())
+					}
+					tl := len(threads[thread.ID])
+					if tl >= maxMsgs {
+						threads[thread.ID] = threads[thread.ID][(1 + tl - maxMsgs):]
 					}
 					threads[thread.ID] = append(threads[thread.ID], ChatMessage{
 						Role:    "user",
