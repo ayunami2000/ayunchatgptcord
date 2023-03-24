@@ -368,6 +368,9 @@ func interactionCreateEvent(e *gateway.InteractionCreateEvent) {
 			log.Println("could not create thread:", err)
 			break
 		}
+		s.ModifyChannel(thread.ID, api.ModifyChannelData{
+			UserRateLimit: option.NewNullableUint(3),
+		})
 		if expectingJoins[thread.ID] == nil {
 			expectingJoins[thread.ID] = &UserIDListWithLock{}
 		}
